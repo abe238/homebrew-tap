@@ -19,3 +19,5 @@ Update any of them with `brew upgrade <name>`. Remove one with `brew uninstall <
 - **hotin, nhc-pp-cli, shelters-pp-cli:** nothing else to do.
 
 Each tool's license is in its own repository.
+
+Formulae are kept current by a scheduled check (`.github/workflows/bump.yml`): it finds a tool's new release, installs and tests the formula, and only then publishes it.

@@ -1,0 +1,84 @@
+name: bump
+
+# Every 6 hours: bring each formula to its tool's latest published version (scripts/bump.py), then install and
+# test every changed formula on this runner. The new versions are published only when all of that passes.
+# Runs on a schedule or by hand only, never on a pull request, because it may write to main.
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      test_all:
+        description: "Install and test every formula, even when nothing changed"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      HOMEBREW_NO_ENV_HINTS: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Find new versions
+        id: bump
+        run: |
+          set -euo pipefail
+          python3 -I scripts/bump.py > bump.log
+          cat bump.log
+          echo "changed=$(sed -n 's/^CHANGED: //p' bump.log)" >> "$GITHUB_OUTPUT"
+          rm -f bump.log
+
+      # The checkout itself is used as the tap (a link, not a clone), so the edited files are what gets tested.
+      - name: Install and test
+        env:
+          CHANGED: ${{ steps.bump.outputs.changed }}
+          TEST_ALL: ${{ inputs.test_all }}
+        run: |
+          set -euo pipefail
+          names="$CHANGED"
+          if [ "$TEST_ALL" = "true" ]; then names="onionskin hotin realstop nhc-pp-cli shelters-pp-cli"; fi
+          if [ -z "$names" ]; then echo "Nothing changed."; exit 0; fi
+          taps="$(brew --repository)/Library/Taps/abe238"
+          mkdir -p "$taps"
+          ln -s "$GITHUB_WORKSPACE" "$taps/homebrew-tap"
+          for n in $names; do
+            brew install --build-from-source "abe238/tap/$n"
+            brew test "abe238/tap/$n"
+          done
+
+      # Written through GitHub's API, one file per commit, so the commit is made by GitHub's own bot account.
+      - name: Publish the new versions
+        if: steps.bump.outputs.changed != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANGED: ${{ steps.bump.outputs.changed }}
+        run: |
+          set -euo pipefail
+          for n in $CHANGED; do
+            f="Formula/$n.rb"
+            sha="$(gh api "repos/$GITHUB_REPOSITORY/contents/$f?ref=main" --jq .sha)"
+            v="$(sed -En 's/^  url ".*[-v]([0-9][0-9.]*[0-9])\.(tgz|tar\.gz)"$/\1/p' "$f")"
+            gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/$f" \
+              -f message="$n $v" -f branch=main -f sha="$sha" -f content="$(base64 < "$f" | tr -d '\n')" > /dev/null
+            echo "published $n $v"
+          done
+
+      # GitHub turns a schedule off after 60 days without activity in the repository. Turning it on again
+      # on every run keeps it alive through a quiet stretch.
+      - name: Keep the schedule on
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/bump.yml/enable"
