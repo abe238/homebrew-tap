@@ -12,16 +12,24 @@ class Onionskin < Formula
     system "npm", "install", *std_npm_args
     bin.install_symlink libexec.glob("bin/*")
 
-    # The npm package ships a prebuilt helper for Apple's on-device model.
-    # Remove it and build it from the Swift source beside it where the SDK allows.
+    # The npm package ships a small helper for Apple's on-device model, built for Apple silicon.
+    # Rebuild it from the Swift source beside it when this Mac's SDK can (the source needs the
+    # macOS 27 SDK), keep it as shipped when it cannot, and remove it on Intel, where it cannot run.
     helper_dir = libexec/"lib/node_modules/onionskin-cli/scripts/rewriter/apple"
-    rm [helper_dir/"onionskin-fm", helper_dir/"onionskin-fm.json"]
-    if Hardware::CPU.arm? && MacOS.version >= :tahoe
+    helper = helper_dir/"onionskin-fm"
+    record_file = helper_dir/"onionskin-fm.json"
+    if Hardware::CPU.arm?
       target = "arm64-apple-macos26.0"
-      helper = helper_dir/"onionskin-fm"
-      system "swiftc", "-O", "-parse-as-library", "-target", target, helper_dir/"main.swift", "-o", helper
-      record = { file: "onionskin-fm", target:, size: helper.size, sha256: helper.sha256 }
-      (helper_dir/"onionskin-fm.json").write "#{JSON.pretty_generate(record)}\n"
+      built = buildpath/"onionskin-fm.built"
+      if quiet_system "swiftc", "-O", "-parse-as-library", "-target", target, helper_dir/"main.swift", "-o", built
+        rm helper
+        cp built, helper
+        chmod 0755, helper
+        record = { file: "onionskin-fm", target:, size: helper.size, sha256: helper.sha256 }
+        record_file.atomic_write "#{JSON.pretty_generate(record)}\n"
+      end
+    else
+      rm [helper, record_file]
     end
   end
 
