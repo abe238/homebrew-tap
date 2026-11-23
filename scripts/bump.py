@@ -3,7 +3,7 @@
 
 Usage: python3 scripts/bump.py [--check]
 Prints one line per formula and, last, "CHANGED: <names>" (space separated, may be empty).
---check changes nothing and exits 1 when a formula is behind.
+--check changes nothing and exits 3 when a formula is behind. Exit 1 means the run failed.
 
 Safety rules, because a formula is code that runs on other people's Macs:
 - A version is accepted only when it is plain digits and dots, and only when it is newer than the one in the file.
@@ -106,7 +106,7 @@ def main():
         text = text.replace(f'  url "{have_url}"', f'  url "{url}"', 1).replace(f'  sha256 "{have_sha}"', f'  sha256 "{sha}"', 1)
         path.write_text(text)
     print("CHANGED: " + " ".join(changed))
-    return 1 if (check and changed) else 0
+    return 3 if (check and changed) else 0
 
 
 if __name__ == "__main__":

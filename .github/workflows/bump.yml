@@ -1,12 +1,13 @@
 name: bump
 
-# Every 6 hours: bring each formula to its tool's latest published version (scripts/bump.py), then install and
-# test every changed formula on this runner. The new versions are published only when all of that passes.
+# Once a day: look for a new published version of each tool (a few seconds on a Linux runner). Only when one
+# exists does the Mac job start: it updates the formula (scripts/bump.py), installs and tests it on this runner,
+# and publishes the new version only when all of that passes.
 # Runs on a schedule or by hand only, never on a pull request, because it may write to main.
 
 on:
   schedule:
-    - cron: "17 */6 * * *"
+    - cron: "17 14 * * *"
   workflow_dispatch:
     inputs:
       test_all:
@@ -15,24 +16,55 @@ on:
         default: false
 
 permissions:
-  contents: write
-  actions: write
+  contents: read
 
 concurrency:
   group: bump
   cancel-in-progress: false
 
 jobs:
+  find:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Look for new versions
+        id: check
+        run: |
+          set -uo pipefail
+          python3 -I scripts/bump.py --check > check.log
+          rc=$?
+          cat check.log
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then exit "$rc"; fi
+          echo "changed=$(sed -n 's/^CHANGED: //p' check.log)" >> "$GITHUB_OUTPUT"
+
+      # GitHub turns a schedule off after 60 days without activity in the repository. Turning it on again
+      # on every run keeps it alive through a quiet stretch.
+      - name: Keep the schedule on
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/bump.yml/enable"
+
   bump:
+    needs: find
+    if: needs.find.outputs.changed != '' || inputs.test_all
     runs-on: macos-latest
     timeout-minutes: 45
+    permissions:
+      contents: write
     env:
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
       HOMEBREW_NO_ENV_HINTS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Find new versions
+      - name: Update the formulae
         id: bump
         run: |
           set -euo pipefail
@@ -75,10 +107,3 @@ jobs:
               -f message="$n $v" -f branch=main -f sha="$sha" -f content="$(base64 < "$f" | tr -d '\n')" > /dev/null
             echo "published $n $v"
           done
-
-      # GitHub turns a schedule off after 60 days without activity in the repository. Turning it on again
-      # on every run keeps it alive through a quiet stretch.
-      - name: Keep the schedule on
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/bump.yml/enable"
