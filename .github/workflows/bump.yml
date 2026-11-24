@@ -1,17 +1,20 @@
 name: bump
 
-# Once a day: look for a new published version of each tool (a few seconds on a Linux runner). Only when one
-# exists does the Mac job start: it updates the formula (scripts/bump.py), installs and tests it on this runner,
-# and publishes the new version only when all of that passes.
-# Runs on a schedule or by hand only, never on a pull request, because it may write to main.
+# Started by hand or by scripts/local-bump.sh only; there is no schedule.
+# The installing and testing happens on a Mac at home (scripts/local-bump.sh). That job then starts this one
+# with the names, versions and checksums it tested. This job works out the same update again on Linux (a few
+# seconds) and writes it to main only when its result is exactly what was tested.
+# "test_all" is a separate, manual check of every formula on GitHub's Mac runner.
 
 on:
-  schedule:
-    - cron: "17 14 * * *"
   workflow_dispatch:
     inputs:
+      tested:
+        description: "What was tested, as name=version=sha256, space separated"
+        type: string
+        default: ""
       test_all:
-        description: "Install and test every formula, even when nothing changed"
+        description: "Install and test every formula on GitHub's Mac runner"
         type: boolean
         default: false
 
@@ -23,73 +26,48 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  find:
+  publish:
+    if: inputs.tested != ''
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: read
-      actions: write
-    outputs:
-      changed: ${{ steps.check.outputs.changed }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Look for new versions
-        id: check
-        run: |
-          set -uo pipefail
-          python3 -I scripts/bump.py --check > check.log
-          rc=$?
-          cat check.log
-          if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then exit "$rc"; fi
-          echo "changed=$(sed -n 's/^CHANGED: //p' check.log)" >> "$GITHUB_OUTPUT"
-
-      # GitHub turns a schedule off after 60 days without activity in the repository. Turning it on again
-      # on every run keeps it alive through a quiet stretch.
-      - name: Keep the schedule on
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/bump.yml/enable"
-
-  bump:
-    needs: find
-    if: needs.find.outputs.changed != '' || inputs.test_all
-    runs-on: macos-latest
-    timeout-minutes: 45
-    permissions:
       contents: write
-    env:
-      HOMEBREW_NO_INSTALL_CLEANUP: "1"
-      HOMEBREW_NO_ENV_HINTS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Update the formulae
+      - name: Work out the update and compare it with what was tested
         id: bump
+        env:
+          TESTED: ${{ inputs.tested }}
         run: |
           set -euo pipefail
+          for t in $TESTED; do
+            if ! printf '%s' "$t" | grep -Eq '^[a-z0-9][a-z0-9-]*=[0-9][0-9.]*[0-9]=[0-9a-f]{64}$'; then
+              echo "Not in the form name=version=sha256: $t"; exit 1
+            fi
+          done
           python3 -I scripts/bump.py > bump.log
           cat bump.log
-          echo "changed=$(sed -n 's/^CHANGED: //p' bump.log)" >> "$GITHUB_OUTPUT"
+          changed="$(sed -n 's/^CHANGED: //p' bump.log)"
           rm -f bump.log
-
-      # The checkout itself is used as the tap (a link, not a clone), so the edited files are what gets tested.
-      - name: Install and test
-        env:
-          CHANGED: ${{ steps.bump.outputs.changed }}
-          TEST_ALL: ${{ inputs.test_all }}
-        run: |
-          set -euo pipefail
-          names="$CHANGED"
-          if [ "$TEST_ALL" = "true" ]; then names="onionskin hotin realstop nhc-pp-cli shelters-pp-cli"; fi
-          if [ -z "$names" ]; then echo "Nothing changed."; exit 0; fi
-          taps="$(brew --repository)/Library/Taps/abe238"
-          mkdir -p "$taps"
-          ln -s "$GITHUB_WORKSPACE" "$taps/homebrew-tap"
-          for n in $names; do
-            brew install --build-from-source "abe238/tap/$n"
-            brew test "abe238/tap/$n"
+          entry() {
+            v="$(sed -En 's/^  url ".*[-v]([0-9][0-9.]*[0-9])\.(tgz|tar\.gz)"$/\1/p' "Formula/$1.rb")"
+            s="$(sed -En 's/^  sha256 "([0-9a-f]{64})"$/\1/p' "Formula/$1.rb")"
+            echo "$1=$v=$s"
+          }
+          # Everything this run would change must have been tested, exactly as tested.
+          for n in $changed; do
+            e="$(entry "$n")"
+            case " $TESTED " in *" $e "*) ;; *) echo "Not tested as it would be published: $e"; exit 1 ;; esac
           done
+          # Everything that was tested must be either this run's change or what main already holds.
+          for t in $TESTED; do
+            n="${t%%=*}"
+            [ -f "Formula/$n.rb" ] || { echo "No such formula: $n"; exit 1; }
+            [ "$(entry "$n")" = "$t" ] || { echo "Tested $t but the current result is $(entry "$n")"; exit 1; }
+          done
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          if [ -z "$changed" ]; then echo "main already holds everything that was tested."; fi
 
       # Written through GitHub's API, one file per commit, so the commit is made by GitHub's own bot account.
       - name: Publish the new versions
@@ -104,6 +82,29 @@ jobs:
             sha="$(gh api "repos/$GITHUB_REPOSITORY/contents/$f?ref=main" --jq .sha)"
             v="$(sed -En 's/^  url ".*[-v]([0-9][0-9.]*[0-9])\.(tgz|tar\.gz)"$/\1/p' "$f")"
             gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/$f" \
-              -f message="$n $v" -f branch=main -f sha="$sha" -f content="$(base64 < "$f" | tr -d '\n')" > /dev/null
+              -f message="$n $v" -f branch=main -f sha="$sha" -f content="$(base64 -w0 < "$f")" > /dev/null
             echo "published $n $v"
+          done
+
+  test-all:
+    if: inputs.test_all
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      HOMEBREW_NO_ENV_HINTS: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The checkout itself is used as the tap (a link, not a clone).
+      - name: Install and test every formula
+        run: |
+          set -euo pipefail
+          taps="$(brew --repository)/Library/Taps/abe238"
+          mkdir -p "$taps"
+          ln -s "$GITHUB_WORKSPACE" "$taps/homebrew-tap"
+          for f in Formula/*.rb; do
+            n="$(basename "$f" .rb)"
+            brew install --build-from-source "abe238/tap/$n"
+            brew test "abe238/tap/$n"
           done

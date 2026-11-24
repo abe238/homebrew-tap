@@ -20,4 +20,4 @@ Update any of them with `brew upgrade <name>`. Remove one with `brew uninstall <
 
 Each tool's license is in its own repository.
 
-Formulae are kept current by a scheduled check (`.github/workflows/bump.yml`): it finds a tool's new release, installs and tests the formula, and only then publishes it.
+Formulae are kept current by a daily job on a Mac (`scripts/local-bump.sh`): it finds a tool's new release, installs and tests the updated formula (`scripts/test-formula.sh`), and only then asks GitHub to publish it (`.github/workflows/bump.yml`).
