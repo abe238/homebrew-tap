@@ -11,14 +11,15 @@ export HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1
 TAP="abe238/localtest"
 [ "$#" -gt 0 ] || { echo "usage: $0 formula.rb [...]"; exit 2; }
 
+# Nothing below may touch a formula this Mac already has. If the list cannot be read, stop.
+installed="$(brew list --formula -1 </dev/null)" || { echo "FAIL: could not list installed formulae"; exit 1; }
 names=()
 for f in "$@"; do
   [ -f "$f" ] || { echo "FAIL: no such file: $f"; exit 2; }
   n="$(basename "$f" .rb)"
-  if brew list --formula -1 </dev/null | grep -qx "$n"; then
-    echo "SKIP: $n is already installed on this Mac; not touching it"
-    exit 4
-  fi
+  case $'\n'"$installed"$'\n' in
+    *$'\n'"$n"$'\n'*) echo "SKIP: $n is already installed on this Mac; not touching it"; exit 4 ;;
+  esac
   names+=("$n")
 done
 
