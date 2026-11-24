@@ -41,9 +41,10 @@ for n in $names; do
   f="Formula/$n.rb"
   [ -f "$f" ] || fail "No formula file for $n."
   v="$(sed -En 's/^  url ".*[-v]([0-9][0-9.]*[0-9])\.(tgz|tar\.gz)"$/\1/p' "$f")"
-  s="$(sed -En 's/^  sha256 "([0-9a-f]{64})"$/\1/p' "$f")"
-  case "$v$s" in *[!0-9a-f.]*|"") fail "Could not read the version and checksum of $n." ;; esac
-  [ "${#s}" -eq 64 ] || fail "Could not read one checksum for $n."
+  # The checksum of the whole formula file: GitHub publishes only a byte-for-byte copy of what is tested here.
+  s="$(shasum -a 256 "$f" | cut -d' ' -f1)"
+  case "$v" in *[!0-9.]*|"") fail "Could not read the version of $n." ;; esac
+  [ "${#s}" -eq 64 ] || fail "Could not checksum the formula file of $n."
   files+=("$f")
   tested="$tested $n=$v=$s"
 done
@@ -54,7 +55,15 @@ if [ -n "$HOST" ]; then
   scp -q -o BatchMode=yes scripts/test-formula.sh "${files[@]}" "$HOST:$dir/" || fail "Could not copy files to the test Mac."
   args=""
   for f in "${files[@]}"; do args="$args $dir/$(basename "$f")"; done
-  ssh -o BatchMode=yes "$HOST" "bash $dir/test-formula.sh $args; rc=\$?; rm -rf $dir; exit \$rc" </dev/null > "$work/test.log" 2>&1
+  ssh -o BatchMode=yes -o ServerAliveInterval=30 "$HOST" "bash $dir/test-formula.sh $args; rc=\$?; rm -rf $dir; exit \$rc" </dev/null > "$work/test.log" 2>&1 &
+  pid=$!
+  # Stop a build that hangs: one hour is far beyond any of these installs.
+  waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 5; waited=$((waited + 5))
+    [ "$waited" -ge 3600 ] && kill "$pid" 2>/dev/null
+  done
+  wait "$pid"
   rc=$?
 else
   bash scripts/test-formula.sh "${files[@]}" > "$work/test.log" 2>&1
@@ -65,26 +74,20 @@ if [ "$rc" -ne 0 ] || ! grep -q '^ALL PASSED' "$work/test.log"; then
   fail "Install or test did not pass for: $names. Nothing was published. Last lines: $(tail -3 "$work/test.log" | tr '\n' ' ')"
 fi
 
-before="$(gh run list -R "$REPO" --workflow bump.yml -L 1 --json databaseId --jq '.[0].databaseId // 0')" || fail "Could not read GitHub runs (sign-in?). Tests passed but nothing was published."
-gh workflow run bump.yml -R "$REPO" -f tested="$tested" || fail "Could not start the publish run. Tests passed but nothing was published."
-id=""
-for _ in $(seq 1 30); do
-  id="$(gh run list -R "$REPO" --workflow bump.yml -L 1 --json databaseId --jq '.[0].databaseId // 0')"
-  [ -n "$id" ] && [ "$id" != "$before" ] && break
-  id=""
-  sleep 4
-done
-[ -n "$id" ] || fail "The publish run did not appear. Tests passed but nothing was published."
+gh workflow run bump.yml -R "$REPO" --ref main -f tested="$tested" > "$work/dispatch.log" 2>&1 || fail "Could not start the publish run (sign-in?). Tests passed but nothing was published."
+# gh prints the address of the run it started; follow that run and no other.
+id="$(sed -En 's#^https://github.com/'"$REPO"'/actions/runs/([0-9]+)$#\1#p' "$work/dispatch.log")"
+case "$id" in ""|*[!0-9]*) fail "Could not tell which publish run was started. Tests passed; check https://github.com/$REPO/actions" ;; esac
 gh run watch "$id" -R "$REPO" --exit-status > "$work/watch.log" 2>&1 || fail "The publish run failed: https://github.com/$REPO/actions/runs/$id"
 
 # Read back what main now holds; a green run is not the proof.
 for t in $tested; do
   n="${t%%=*}"; rest="${t#*=}"; v="${rest%%=*}"; s="${rest#*=}"
-  live="$(gh api "repos/$REPO/contents/Formula/$n.rb?ref=main" --jq .content | base64 -d)" || fail "Could not read $n back from main."
-  echo "$live" | grep -q "$s" || fail "main does not hold the tested $n $v after the publish run."
+  gh api "repos/$REPO/contents/Formula/$n.rb?ref=main" -H "Accept: application/vnd.github.raw" > "$work/live.rb" || fail "Could not read $n back from main."
+  [ "$(shasum -a 256 "$work/live.rb" | cut -d' ' -f1)" = "$s" ] || fail "main does not hold the tested $n $v after the publish run."
 done
 if [ -n "${TAP_FORCE:-}" ] && [ -z "$(sed -n 's/^CHANGED: //p' "$work/bump.log")" ]; then
   say "Trial run passed: $tested"
 else
-  notify "Published after passing tests: $(echo "$tested" | sed -E 's/=([^= ]+)=[0-9a-f]{64}/ \1/g')"
+  notify "On main after passing tests: $(echo "$tested" | sed -E 's/=([^= ]+)=[0-9a-f]{64}/ \1/g')"
 fi

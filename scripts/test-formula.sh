@@ -6,9 +6,10 @@
 set -uo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_ENV_HINTS=1
-export HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1
+export HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_AUTOREMOVE=1
 
-TAP="abe238/localtest"
+# A tap name of this run's own, so nothing that already exists is ever reused or removed.
+TAP="abe238/bumptest$$"
 [ "$#" -gt 0 ] || { echo "usage: $0 formula.rb [...]"; exit 2; }
 
 # Nothing below may touch a formula this Mac already has. If the list cannot be read, stop.
@@ -32,7 +33,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cleanup
+if brew tap </dev/null | grep -qx "$TAP"; then echo "FAIL: tap $TAP already exists"; trap - EXIT; exit 1; fi
 brew tap-new --no-git "$TAP" </dev/null >/dev/null || { echo "FAIL: could not create the local tap"; exit 1; }
 dir="$(brew --repository "$TAP")/Formula"
 mkdir -p "$dir"
@@ -47,4 +48,14 @@ for i in "${!names[@]}"; do
   brew test "$TAP/$n" </dev/null || { echo "FAIL: $n test"; exit 1; }
   echo "PASS: $n"
 done
+
+# Leave nothing behind, and say so only after checking.
+cleanup
+trap - EXIT
+left="$(brew list --formula -1 </dev/null)" || { echo "FAIL: could not list installed formulae after cleanup"; exit 1; }
+for n in "${names[@]}"; do
+  case $'\n'"$left"$'\n' in *$'\n'"$n"$'\n'*) echo "FAIL: $n is still installed after cleanup"; exit 1 ;; esac
+done
+taps="$(brew tap </dev/null)" || { echo "FAIL: could not list taps after cleanup"; exit 1; }
+case $'\n'"$taps"$'\n' in *$'\n'"$TAP"$'\n'*) echo "FAIL: tap $TAP is still present after cleanup"; exit 1 ;; esac
 echo "ALL PASSED: ${names[*]}"

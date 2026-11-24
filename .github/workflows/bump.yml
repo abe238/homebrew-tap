@@ -3,14 +3,14 @@ name: bump
 # Started by hand or by scripts/local-bump.sh only; there is no schedule.
 # The installing and testing happens on a Mac at home (scripts/local-bump.sh). That job then starts this one
 # with the names, versions and checksums it tested. This job works out the same update again on Linux (a few
-# seconds) and writes it to main only when its result is exactly what was tested.
+# seconds) and writes it to main only when each formula file is byte for byte what was tested.
 # "test_all" is a separate, manual check of every formula on GitHub's Mac runner.
 
 on:
   workflow_dispatch:
     inputs:
       tested:
-        description: "What was tested, as name=version=sha256, space separated"
+        description: "What was tested, as name=version=sha256 of the formula file, space separated"
         type: string
         default: ""
       test_all:
@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   publish:
-    if: inputs.tested != ''
+    if: inputs.tested != '' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -52,7 +52,7 @@ jobs:
           rm -f bump.log
           entry() {
             v="$(sed -En 's/^  url ".*[-v]([0-9][0-9.]*[0-9])\.(tgz|tar\.gz)"$/\1/p' "Formula/$1.rb")"
-            s="$(sed -En 's/^  sha256 "([0-9a-f]{64})"$/\1/p' "Formula/$1.rb")"
+            s="$(sha256sum "Formula/$1.rb" | cut -d' ' -f1)"
             echo "$1=$v=$s"
           }
           # Everything this run would change must have been tested, exactly as tested.
@@ -79,7 +79,8 @@ jobs:
           set -euo pipefail
           for n in $CHANGED; do
             f="Formula/$n.rb"
-            sha="$(gh api "repos/$GITHUB_REPOSITORY/contents/$f?ref=main" --jq .sha)"
+            # The file as it was when this job checked it out: GitHub refuses the write if main changed since.
+            sha="$(git rev-parse "HEAD:$f")"
             v="$(sed -En 's/^  url ".*[-v]([0-9][0-9.]*[0-9])\.(tgz|tar\.gz)"$/\1/p' "$f")"
             gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/$f" \
               -f message="$n $v" -f branch=main -f sha="$sha" -f content="$(base64 -w0 < "$f")" > /dev/null
@@ -87,7 +88,7 @@ jobs:
           done
 
   test-all:
-    if: inputs.test_all
+    if: inputs.test_all && inputs.tested == ''
     runs-on: macos-latest
     timeout-minutes: 45
     env:
